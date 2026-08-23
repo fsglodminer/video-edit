@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { useEditor } from '../state/store';
-import { Button, Icon } from './ui';
+import { ASPECT_RATIOS } from '../lib/model';
+import { Button, Icon, Menu } from './ui';
 
 export function TopBar({ onExport }: { onExport: () => void }) {
   const project = useEditor((s) => s.project);
@@ -27,18 +28,71 @@ export function TopBar({ onExport }: { onExport: () => void }) {
     api.listProjects().then((r) => setProjects(r.projects)).catch(() => undefined);
   }, [project?.id, status]);
 
+  const current = ASPECT_RATIOS.find(
+    (r) => project && Math.abs(r.width / r.height - project.settings.width / project.settings.height) < 0.02
+  );
+
   return (
     <header className="topbar">
-      <div className="topbar-brand">
-        <span className="logo">✂</span>
-        <span>JumpCut</span>
-      </div>
-
-      <div className="topbar-project">
+      <div className="topbar-left">
+        <span className="brandmark" aria-hidden>
+          <svg viewBox="0 0 24 24">
+            <path d="M5 4.2 19 12 5 19.8z" />
+          </svg>
+        </span>
+        <Menu
+          align="left"
+          trigger={({ toggle }) => (
+            <button type="button" className="project-chip" onClick={toggle} title="Projects">
+              <span>{project?.name ?? 'Loading…'}</span>
+              {Icon.chevronDown}
+            </button>
+          )}
+        >
+          {(close) => (
+            <>
+              <div className="menu-head">Projects</div>
+              {projects.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`menu-item${p.id === project?.id ? ' is-active' : ''}`}
+                  onClick={() => {
+                    void loadProject(p.id);
+                    close();
+                  }}
+                >
+                  {p.name}
+                </button>
+              ))}
+              <div className="menu-divider" />
+              <button
+                type="button"
+                className="menu-item"
+                onClick={() => {
+                  void newProject('Untitled video');
+                  close();
+                }}
+              >
+                {Icon.plus} New project
+              </button>
+              <button
+                type="button"
+                className="menu-item"
+                onClick={() => {
+                  setRenaming(true);
+                  close();
+                }}
+              >
+                Rename this project
+              </button>
+            </>
+          )}
+        </Menu>
         {renaming ? (
           <input
             autoFocus
-            className="text-field"
+            className="text-field rename-field"
             value={name}
             onChange={(e) => setName(e.target.value)}
             onBlur={() => {
@@ -47,42 +101,61 @@ export function TopBar({ onExport }: { onExport: () => void }) {
             }}
             onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
           />
-        ) : (
-          <button type="button" className="project-name" onClick={() => setRenaming(true)} title="Rename">
-            {project?.name ?? 'Loading…'}
-          </button>
-        )}
-        <span className={`save-state${dirty ? ' is-dirty' : ''}`}>{saving ? 'Saving…' : dirty ? 'Unsaved' : 'Saved'}</span>
+        ) : null}
+        <span className={`save-state${dirty ? ' is-dirty' : ''}`}>{saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'All changes saved'}</span>
       </div>
 
-      <div className="topbar-actions">
-        <Button variant="ghost" size="sm" onClick={undo} disabled={!past} title="Undo (⌘Z)">
+      <div className="topbar-centre">
+        <button type="button" className="icon-button" onClick={undo} disabled={!past} title="Undo (⌘Z)">
           {Icon.undo}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={redo} disabled={!future} title="Redo (⇧⌘Z)">
+        </button>
+        <button type="button" className="icon-button" onClick={redo} disabled={!future} title="Redo (⇧⌘Z)">
           {Icon.redo}
-        </Button>
-        <span className="toolbar-divider" />
-        <select
-          className="select select-compact"
-          value={project?.id ?? ''}
-          onChange={(e) => {
-            if (e.target.value === '__new') void newProject('Untitled project');
-            else void loadProject(e.target.value);
-          }}
-          title="Switch project"
+        </button>
+      </div>
+
+      <div className="topbar-right">
+        <Menu
+          trigger={({ toggle }) => (
+            <button type="button" className="aspect-chip" onClick={toggle} title="Canvas shape">
+              {Icon.aspect}
+              <span>{current?.label ?? 'Custom'}</span>
+              {Icon.chevronDown}
+            </button>
+          )}
         >
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-          <option value="__new">+ New project…</option>
-        </select>
+          {(close) => (
+            <>
+              <div className="menu-head">Canvas shape</div>
+              {ASPECT_RATIOS.map((ratio) => (
+                <button
+                  key={ratio.id}
+                  type="button"
+                  className={`menu-item${current?.id === ratio.id ? ' is-active' : ''}`}
+                  onClick={() => {
+                    commit(`Canvas ${ratio.label}`, (d) => {
+                      d.settings.width = ratio.width;
+                      d.settings.height = ratio.height;
+                    });
+                    close();
+                  }}
+                >
+                  <span className={`ratio-glyph ratio-${ratio.id.replace(':', '-')}`} />
+                  <span className="menu-item-body">
+                    <strong>{ratio.label}</strong>
+                    <small>{ratio.hint}</small>
+                  </span>
+                  {current?.id === ratio.id ? Icon.check : null}
+                </button>
+              ))}
+            </>
+          )}
+        </Menu>
+
         <Button variant="ghost" size="sm" onClick={() => void save()} disabled={!dirty || saving}>
           Save
         </Button>
-        <Button variant="primary" size="sm" onClick={onExport} disabled={!health?.ok}>
+        <Button variant="primary" size="md" onClick={onExport} disabled={!health?.ok} className="export-button">
           {Icon.export} Export
         </Button>
       </div>

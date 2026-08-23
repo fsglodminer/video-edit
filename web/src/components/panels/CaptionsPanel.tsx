@@ -1,9 +1,9 @@
 import React, { useRef, useState } from 'react';
-import { api } from '../lib/api';
-import type { CaptionItem } from '../lib/types';
-import { useEditor } from '../state/store';
-import { formatTime } from '../lib/model';
-import { Button, ColorField, Empty, Field, Icon, Panel, SegmentedControl, Select, Slider, Toggle, useAsyncAction } from './ui';
+import { api } from '../../lib/api';
+import type { CaptionItem } from '../../lib/types';
+import { useEditor } from '../../state/store';
+import { formatTime } from '../../lib/model';
+import { Button, ColorField, Empty, Field, Icon, Panel, SegmentedControl, Select, Slider, Toggle, useAsyncAction } from '../ui';
 
 export function CaptionsPanel() {
   const project = useEditor((s) => s.project);

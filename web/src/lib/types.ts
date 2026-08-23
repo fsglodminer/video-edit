@@ -20,7 +20,7 @@ export interface Media {
   size: number;
 }
 
-export type ClipType = 'video' | 'audio' | 'image' | 'text' | 'solid';
+export type ClipType = 'video' | 'audio' | 'image' | 'text' | 'solid' | 'shape';
 
 export interface Transform {
   fit: 'contain' | 'cover' | 'stretch';
@@ -38,6 +38,32 @@ export interface Crop {
   bottom: number;
 }
 
+export interface ChromaKey {
+  enabled: boolean;
+  color: string;
+  similarity: number;
+  blend: number;
+  despill?: boolean;
+}
+
+export interface ShapeStyle {
+  kind: 'rect' | 'roundrect' | 'ellipse' | 'triangle' | 'arrow' | 'star';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  strokeColor?: string;
+  strokeWidth?: number;
+  radius?: number;
+  filled?: boolean;
+}
+
+export interface Transition {
+  type: string;
+  duration: number;
+}
+
 export interface Effects {
   brightness?: number;
   contrast?: number;
@@ -48,6 +74,9 @@ export interface Effects {
   sharpen?: number;
   grayscale?: boolean;
   invert?: boolean;
+  temperature?: number;
+  vignette?: number;
+  filmFade?: number;
 }
 
 export interface TextStyle {
@@ -72,6 +101,8 @@ export interface TextStyle {
   maxWidth?: number;
   fontName?: string | null;
   fontFile?: string | null;
+  animation?: 'none' | 'fade' | 'slideup' | 'slidedown' | 'pop' | 'typewriter';
+  animationDuration?: number;
 }
 
 export interface Clip {
@@ -96,6 +127,10 @@ export interface Clip {
   crop?: Crop;
   effects: Effects;
   text?: TextStyle;
+  shape?: ShapeStyle;
+  filter?: string;
+  chromaKey?: ChromaKey;
+  transitionIn?: Transition | null;
 }
 
 export type TrackKind = 'video' | 'audio';
@@ -162,6 +197,11 @@ export interface Project {
     loudnessTarget: number;
     ducking: { enabled: boolean; amount: number; attack: number; release: number };
   };
+  brandKit: {
+    colors: string[];
+    font: string | null;
+    logoPath: string | null;
+  };
   watermark: {
     enabled: boolean;
     path: string | null;
@@ -217,4 +257,17 @@ export interface Health {
   dirs: Record<string, string>;
   platform: string;
   cpus: number;
+}
+
+export interface LibraryItem {
+  id: string;
+  label: string;
+}
+
+export interface Library {
+  filters: { id: string; label: string; css: string }[];
+  transitions: { id: string; label: string; group: string }[];
+  textAnimations: LibraryItem[];
+  shapes: LibraryItem[];
+  backgrounds: { id: string; label: string; color: string }[];
 }

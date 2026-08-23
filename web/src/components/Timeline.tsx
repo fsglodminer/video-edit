@@ -8,11 +8,14 @@ import {
   formatTime,
   makeClip,
   makeTextClip,
-  maxDuration,
   projectDuration,
+  removeTransition,
+  rippleDelete,
   snap,
   snapPoints,
   splitClip,
+  transitionPoints,
+  uid,
 } from '../lib/model';
 import { Button, Icon } from './ui';
 
@@ -250,6 +253,36 @@ export function Timeline() {
         toggleSnapping={toggleSnapping}
         ripple={rippleMode}
         toggleRipple={toggleRipple}
+        hasSelection={selection.length > 0}
+        onDuplicate={() => {
+          if (!selection.length) return;
+          commit('Duplicated clip', (draft) => {
+            for (const track of draft.tracks) {
+              for (const clip of [...track.clips]) {
+                if (!selection.includes(clip.id)) continue;
+                const copy = structuredClone(clip);
+                copy.id = uid('c_');
+                copy.start = clipEnd(clip);
+                copy.transitionIn = null;
+                track.clips.push(copy);
+              }
+              track.clips.sort((a, b) => a.start - b.start);
+            }
+          });
+        }}
+        onDelete={() => {
+          if (!selection.length) return;
+          commit(rippleMode ? 'Ripple deleted' : 'Deleted clip', (draft) => {
+            for (const track of draft.tracks) {
+              for (const clip of [...track.clips]) {
+                if (!selection.includes(clip.id)) continue;
+                if (rippleMode) rippleDelete(track, clip);
+                else track.clips = track.clips.filter((c) => c.id !== clip.id);
+              }
+            }
+          });
+          select(null);
+        }}
         onSplit={() => {
           commit('Split clip', (draft) => {
             for (const track of draft.tracks) {
@@ -328,7 +361,10 @@ function TimelineToolbar({
   toggleSnapping,
   ripple,
   toggleRipple,
+  hasSelection,
   onSplit,
+  onDuplicate,
+  onDelete,
   onAddText,
   onAddTrack,
 }: {
@@ -338,40 +374,59 @@ function TimelineToolbar({
   toggleSnapping: () => void;
   ripple: boolean;
   toggleRipple: () => void;
+  hasSelection: boolean;
   onSplit: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
   onAddText: () => void;
   onAddTrack: (kind: 'video' | 'audio') => void;
 }) {
   return (
     <div className="timeline-toolbar">
-      <Button variant="ghost" size="sm" onClick={onSplit} title="Split at playhead (S)">
-        {Icon.split} Split
-      </Button>
-      <Button variant="ghost" size="sm" onClick={onAddText} title="Add a title at the playhead (T)">
-        {Icon.text} Title
-      </Button>
+      <button type="button" className="tool-button" onClick={onSplit} title="Split at playhead (S)">
+        {Icon.split}
+        <span>Split</span>
+      </button>
+      <button type="button" className="tool-button" onClick={onDuplicate} disabled={!hasSelection} title="Duplicate (⌘D)">
+        {Icon.duplicate}
+        <span>Duplicate</span>
+      </button>
+      <button type="button" className="tool-button" onClick={onDelete} disabled={!hasSelection} title="Delete (Del)">
+        {Icon.trash}
+        <span>Delete</span>
+      </button>
       <span className="toolbar-divider" />
-      <Button variant="ghost" size="sm" active={snapping} onClick={toggleSnapping} title="Snap to edges (hold Alt to bypass)">
-        {Icon.magnet} Snap
-      </Button>
-      <Button variant="ghost" size="sm" active={ripple} onClick={toggleRipple} title="Ripple delete closes the gap">
-        Ripple
-      </Button>
+      <button type="button" className="tool-button" onClick={onAddText} title="Add a title (T)">
+        {Icon.text}
+        <span>Text</span>
+      </button>
       <span className="toolbar-divider" />
-      <Button variant="ghost" size="sm" onClick={() => onAddTrack('video')} title="Add a video track">
-        {Icon.plus} Video track
-      </Button>
-      <Button variant="ghost" size="sm" onClick={() => onAddTrack('audio')} title="Add an audio track">
-        {Icon.plus} Audio track
-      </Button>
+      <button type="button" className={`tool-button${snapping ? ' is-active' : ''}`} onClick={toggleSnapping} title="Snap to edges (N) — hold Alt to bypass">
+        {Icon.magnet}
+        <span>Snap</span>
+      </button>
+      <button type="button" className={`tool-button${ripple ? ' is-active' : ''}`} onClick={toggleRipple} title="Ripple delete closes the gap">
+        {Icon.scissors}
+        <span>Ripple</span>
+      </button>
+      <span className="toolbar-divider" />
+      <button type="button" className="tool-button" onClick={() => onAddTrack('video')} title="Add a video track">
+        {Icon.plus}
+        <span>Video track</span>
+      </button>
+      <button type="button" className="tool-button" onClick={() => onAddTrack('audio')} title="Add an audio track">
+        {Icon.plus}
+        <span>Audio track</span>
+      </button>
+
       <div className="toolbar-spacer" />
       <div className="zoom-control">
         <button type="button" onClick={() => setZoom(zoom / 1.4)} title="Zoom out (−)">
-          −
+          {Icon.minus}
         </button>
-        <input type="range" min={6} max={600} step={1} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} />
+        <input type="range" min={6} max={600} step={1} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} aria-label="Timeline zoom" />
         <button type="button" onClick={() => setZoom(zoom * 1.4)} title="Zoom in (+)">
-          +
+          {Icon.plus}
         </button>
       </div>
     </div>
@@ -503,6 +558,11 @@ function TrackRow({
         onDrop={onDrop}
       >
         {dropHint != null ? <span className="drop-hint" style={{ left: dropHint * zoom }} /> : null}
+        {track.kind === 'video'
+          ? transitionPoints(track).map((point) => (
+              <TransitionMarker key={`tx-${point.clip.id}`} point={point} track={track} zoom={zoom} />
+            ))
+          : null}
         {track.clips.map((clip) => (
           <ClipView
             key={clip.id}
@@ -520,6 +580,54 @@ function TrackRow({
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * The badge sitting on a cut between two clips: click to open the transitions
+ * panel for it, or remove the one that's there.
+ */
+function TransitionMarker({
+  point,
+  track,
+  zoom,
+}: {
+  point: { clip: Clip; previous: Clip; at: number };
+  track: Track;
+  zoom: number;
+}) {
+  const commit = useEditor((s) => s.commit);
+  const select = useEditor((s) => s.select);
+  const setPanel = useEditor((s) => s.setPanel);
+  const setPanelOpen = useEditor((s) => s.setPanelOpen);
+  const applied = point.clip.transitionIn;
+  const overlap = Math.max(0, clipEnd(point.previous) - point.clip.start);
+  const width = applied ? Math.max(18, overlap * zoom) : 18;
+
+  return (
+    <button
+      type="button"
+      className={`transition-marker${applied ? ' is-applied' : ''}`}
+      style={{ left: point.clip.start * zoom + (applied ? 0 : -9), width }}
+      title={applied ? `${applied.type} · ${overlap.toFixed(2)}s — click to change, right-click to remove` : 'Add a transition here'}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        select(point.clip.id);
+        setPanel('transitions');
+        setPanelOpen(true);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (!applied) return;
+        commit('Removed transition', (draft) => {
+          const t = draft.tracks.find((x) => x.id === track.id);
+          if (t) removeTransition(t, point.clip.id);
+        });
+      }}
+    >
+      <span className="transition-marker-glyph">{applied ? Icon.transitions : Icon.plus}</span>
+    </button>
   );
 }
 
@@ -551,7 +659,14 @@ function ClipView({
   const width = Math.max(4, clip.duration * zoom);
   const showThumbs = track.kind === 'video' && media?.hasVideo && width > 40;
   const showWave = Boolean(media?.hasAudio) && width > 24 && !clip.muted;
-  const label = clip.type === 'text' ? clip.text?.content?.split('\n')[0] || 'Title' : media?.name || clip.name || 'Clip';
+  const label =
+    clip.type === 'text'
+      ? clip.text?.content?.split('\n')[0] || 'Title'
+      : clip.type === 'shape'
+        ? `${clip.shape?.kind ?? 'Shape'}`
+        : clip.type === 'solid'
+          ? 'Background'
+          : media?.name || clip.name || 'Clip';
 
   return (
     <div
@@ -567,8 +682,11 @@ function ClipView({
       {showThumbs && media ? <ClipFilmstrip clip={clip} media={media} width={width} height={height - 8} /> : null}
       {showWave && media ? <ClipWaveform clip={clip} media={media} width={width} height={height - 8} /> : null}
       {clip.type === 'text' ? <span className="clip-texticon">{Icon.text}</span> : null}
+      {clip.type === 'shape' ? <span className="clip-texticon">{Icon.content}</span> : null}
+      {clip.type === 'solid' ? <span className="clip-solid" style={{ background: clip.color || '#000' }} /> : null}
       <span className="clip-label">{label}</span>
       {clip.speed !== 1 ? <span className="clip-badge">{clip.speed.toFixed(2)}×</span> : null}
+      {clip.transitionIn ? <span className="clip-transition-edge" style={{ width: Math.max(6, clip.transitionIn.duration * zoom) }} /> : null}
       {clip.fadeIn > 0 ? <span className="clip-fade clip-fade-in" style={{ width: clip.fadeIn * zoom }} /> : null}
       {clip.fadeOut > 0 ? <span className="clip-fade clip-fade-out" style={{ width: clip.fadeOut * zoom }} /> : null}
       <span className="clip-handle clip-handle-start" onPointerDown={(e) => onPointerDown(e, clip, track, 'trim-start')} />

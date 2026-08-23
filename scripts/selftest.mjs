@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { run, ffmpegPath, capabilities } = await import(path.join(root, 'server/src/ffmpeg.js'));
+const { run, runBinary, ffmpegPath, capabilities } = await import(path.join(root, 'server/src/ffmpeg.js'));
 const { inspect, detectSilence, waveform, filmstrip } = await import(path.join(root, 'server/src/media.js'));
 const { compile, projectDuration } = await import(path.join(root, 'server/src/compile.js'));
 const { buildOutputArgs } = await import(path.join(root, 'server/src/presets.js'));
@@ -104,6 +104,61 @@ async function main() {
   check('renders at project resolution', v?.width === 1920 && v?.height === 1080, `${v?.width}×${v?.height}`);
   check('renders the full timeline', Math.abs(Number(rendered.format.duration) - 5.5) < 0.4, `${Number(rendered.format.duration).toFixed(2)}s`);
   check('renders an audio track', Boolean(au), au?.codec_name);
+
+  console.log('\nTransitions, filters, shapes and green screen…');
+  const rich = blankProject('Self test — effects');
+  rich.media = [a, b];
+  const [rv2, rv1] = rich.tracks.filter((t) => t.kind === 'video');
+  rv1.clips.push(
+    { ...clip(a, 0, 2), filter: 'cinematic' },
+    { ...clip(b, 1.4, 2), transitionIn: { type: 'wipeleft', duration: 0.6 }, filter: 'vivid', effects: { vignette: 0.5, temperature: 0.3 } }
+  );
+  rv2.clips.push({
+    id: 'c_shape', type: 'shape', start: 0.2, duration: 2.6, inPoint: 0, speed: 1, volume: 1, fadeIn: 0.2, fadeOut: 0.2,
+    transform: { fit: 'contain', scale: 1, x: 0, y: 0, rotation: 0, opacity: 1 }, effects: {},
+    shape: { kind: 'roundrect', x: 0.5, y: 0.85, width: 0.4, height: 0.12, color: '#7b61ff', radius: 0.4, filled: true },
+  });
+  rv2.clips.push({
+    id: 'c_anim', type: 'text', start: 0.3, duration: 2.4, inPoint: 0, speed: 1, volume: 1, fadeIn: 0, fadeOut: 0.3,
+    transform: { fit: 'contain', scale: 1, x: 0, y: 0, rotation: 0, opacity: 1 }, effects: {},
+    text: { content: 'Animated', size: 48, color: '#ffffff', align: 'center', x: 0.5, y: 0.85, bold: true,
+            strokeWidth: 0, shadow: false, background: 'none', maxWidth: 0.86, animation: 'typewriter' },
+  });
+
+  const richCompiled = compile(rich, { workDir: DIRS.tmp, fontFile: defaultFontFile() });
+  check('emits an xfade transition', /xfade=transition=wipeleft/.test(richCompiled.filterGraph));
+  check('emits filter-preset colour maths', /colorbalance/.test(richCompiled.filterGraph), 'cinematic');
+  check('emits a vignette', /vignette=/.test(richCompiled.filterGraph));
+  const richOut = path.join(work, 'effects.mp4');
+  await run([...richCompiled.args, ...buildOutputArgs({ format: 'mp4', quality: 'low', fps: 30, hardware: false, speed: 'ultrafast' }), richOut]);
+  const richProbe = await probe(richOut);
+  // Two 2s clips overlapping by 0.6s = 3.4s.
+  check('transition shortens the timeline', Math.abs(Number(richProbe.format.duration) - 3.4) < 0.3, `${Number(richProbe.format.duration).toFixed(2)}s`);
+
+  // Green screen: key a pure-green frame and confirm it drops out.
+  const greenFile = path.join(work, 'green.mp4');
+  await run(['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-t', '2', '-i', 'color=c=0x00ff00:s=320x180:r=30',
+    '-f', 'lavfi', '-t', '2', '-i', 'color=c=white:s=80x60:r=30',
+    '-filter_complex', '[0:v][1:v]overlay=x=120:y=60[out]', '-map', '[out]',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', greenFile]);
+  const greenMedia = await inspect(greenFile);
+  const keyed = blankProject('Self test — key');
+  keyed.media = [greenMedia];
+  keyed.settings.background = '#ff00ff'; // anything keyed shows through as magenta
+  keyed.tracks.filter((t) => t.kind === 'video').at(-1).clips.push({
+    ...clip(greenMedia, 0, 1.5),
+    transform: { fit: 'contain', scale: 1, x: 0, y: 0, rotation: 0, opacity: 1 },
+    chromaKey: { enabled: true, color: '#00ff00', similarity: 0.3, blend: 0.1, despill: true },
+  });
+  const keyCompiled = compile(keyed, { workDir: DIRS.tmp, fontFile: defaultFontFile(), stillFrame: true, startTime: 0.5, endTime: 1 });
+  const keyPng = await runBinary([...keyCompiled.args, '-frames:v', '1', '-c:v', 'png', '-f', 'image2pipe', '-']);
+  const sample = async (x, y) => {
+    const raw = await runBinary(['-hide_banner', '-v', 'quiet', '-i', greenFile, '-frames:v', '1', '-vf', `crop=2:2:${x}:${y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+    return [raw[0], raw[1], raw[2]];
+  };
+  check('green screen renders', keyPng.length > 1000, `${(keyPng.length / 1024).toFixed(0)} KB PNG`);
+  check('source really is green behind the subject', (await sample(10, 10))[1] > 200);
 
   console.log('\nVertical reframe (Shorts)…');
   const vertical = path.join(work, 'short.mp4');

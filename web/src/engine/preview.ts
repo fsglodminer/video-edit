@@ -14,6 +14,7 @@ type Sourced = HTMLVideoElement | HTMLAudioElement | HTMLImageElement;
 interface PooledElement {
   el: Sourced;
   clipId: string;
+  poolKey: string;
   mediaKey: string;
   lastUsed: number;
   ready: boolean;
@@ -48,6 +49,8 @@ export class PreviewEngine {
   private proxies = new Map<string, string>();
   private proxyPending = new Set<string>();
   private proxyResolver: ((media: Media) => Promise<string | null>) | null = null;
+  private filterCss: Record<string, string> = {};
+  private keyCanvas: HTMLCanvasElement | null = null;
 
   constructor(fileUrl: (path: string) => string) {
     this.fileUrl = fileUrl;
@@ -94,6 +97,12 @@ export class PreviewEngine {
 
   setFontFamily(family: string) {
     this.fontFamily = family;
+    this.dirty = true;
+  }
+
+  /** CSS equivalents of the server's look presets, keyed by preset id. */
+  setFilterCss(map: Record<string, string>) {
+    this.filterCss = map;
     this.dirty = true;
   }
 
@@ -196,12 +205,12 @@ export class PreviewEngine {
   }
 
   private elementFor(clip: Clip, media: Media): PooledElement | null {
-    const existing = this.pool.get(clip.id);
-    if (existing && existing.mediaKey === media.key) {
+    const poolKey = `${clip.id}:${media.key}`;
+    const existing = this.pool.get(poolKey);
+    if (existing) {
       existing.lastUsed = performance.now();
       return existing;
     }
-    if (existing) this.release(existing);
 
     const source = this.proxies.get(media.key) ?? media.path;
     let el: Sourced;
@@ -222,7 +231,7 @@ export class PreviewEngine {
       el = audio;
     }
 
-    const pooled: PooledElement = { el, clipId: clip.id, mediaKey: media.key, lastUsed: performance.now(), ready: false };
+    const pooled: PooledElement = { el, clipId: clip.id, poolKey, mediaKey: media.key, lastUsed: performance.now(), ready: false };
     const markReady = () => {
       pooled.ready = true;
       this.dirty = true;
@@ -238,7 +247,7 @@ export class PreviewEngine {
         this.requestProxy(media);
       });
     }
-    this.pool.set(clip.id, pooled);
+    this.pool.set(poolKey, pooled);
     return pooled;
   }
 
@@ -261,7 +270,7 @@ export class PreviewEngine {
       el.removeAttribute('src');
       el.load?.();
     }
-    this.pool.delete(pooled.clipId);
+    this.pool.delete(pooled.poolKey);
   }
 
   private prunePool() {
@@ -276,8 +285,8 @@ export class PreviewEngine {
     const active = new Set<string>();
     for (const entry of this.activeClips()) {
       const { clip, media } = entry;
-      if (!media || clip.type === 'text' || clip.type === 'solid') continue;
-      active.add(clip.id);
+      if (!media || clip.type === 'text' || clip.type === 'solid' || clip.type === 'shape') continue;
+      active.add(`${clip.id}:${media.key}`);
       const pooled = this.elementFor(clip, media);
       if (!pooled) continue;
       pooled.lastUsed = performance.now();
@@ -301,7 +310,7 @@ export class PreviewEngine {
     }
 
     for (const pooled of this.pool.values()) {
-      if (active.has(pooled.clipId)) continue;
+      if (active.has(pooled.poolKey)) continue;
       const el = pooled.el as HTMLMediaElement;
       if ('pause' in el && !el.paused) el.pause();
     }
@@ -324,23 +333,41 @@ export class PreviewEngine {
       .filter((e) => e.kind === 'video')
       .sort((a, b) => b.trackIndex - a.trackIndex);
 
-    for (const entry of entries) {
+    for (const [index, entry] of entries.entries()) {
       const { clip, media } = entry;
-      if (clip.type === 'text') continue;
+      if (clip.type === 'text' || clip.type === 'shape') continue;
+
+      // A clip with a transition overlaps its predecessor; render the incoming
+      // one through the transition's mask so the preview matches the export.
+      const previous = entries
+        .slice(0, index)
+        .reverse()
+        .find((e) => e.trackIndex === entry.trackIndex && e.clip.type !== 'text' && e.clip.type !== 'shape');
+      const transition = clip.transitionIn;
+      const overlap = previous ? previous.clip.start + previous.clip.duration - clip.start : 0;
+      const inTransition = Boolean(transition && previous && overlap > 0.01 && this.time < clip.start + overlap);
+
+      ctx.save();
+      if (inTransition) {
+        const progress = Math.max(0, Math.min(1, (this.time - clip.start) / overlap));
+        applyTransitionMask(ctx, transition!.type, progress, W, H);
+      }
       if (clip.type === 'solid') {
-        ctx.save();
-        ctx.globalAlpha = (clip.transform?.opacity ?? 1) * fadeGain(clip, this.time);
+        ctx.globalAlpha *= (clip.transform?.opacity ?? 1) * fadeGain(clip, this.time);
         ctx.fillStyle = clip.color || '#000000';
         ctx.fillRect(0, 0, W, H);
-        ctx.restore();
-        continue;
+      } else if (media) {
+        const pooled = this.pool.get(`${clip.id}:${media.key}`);
+        if (pooled?.ready) this.drawClip(ctx, pooled.el, clip, media, W, H);
       }
-      if (!media) continue;
-      const pooled = this.pool.get(clip.id);
-      if (!pooled?.ready) continue;
-      this.drawClip(ctx, pooled.el, clip, media, W, H);
+      ctx.restore();
     }
 
+    // Shapes sit above the footage, titles above the shapes — matching the
+    // layer order the ASS pass uses on export.
+    for (const entry of entries) {
+      if (entry.clip.type === 'shape' && entry.clip.shape) drawShape(ctx, entry.clip, this.time, W, H);
+    }
     for (const entry of entries) {
       if (entry.clip.type === 'text' && entry.clip.text) {
         drawText(ctx, entry.clip.text, entry.clip, this.time, W, H, this.fontFamily);
@@ -401,14 +428,68 @@ export class PreviewEngine {
       ctx.rotate((t.rotation * Math.PI) / 180);
       ctx.translate(-(dx + drawW / 2), -(dy + drawH / 2));
     }
-    const filter = cssFilter(clip);
+    const filter = [this.filterCss[clip.filter || 'none'] || '', cssFilter(clip)].filter(Boolean).join(' ');
     if (filter) ctx.filter = filter;
+    const source = clip.chromaKey?.enabled ? this.keyed(el, clip, sx, sy, sw, sh) : null;
     try {
-      ctx.drawImage(el as CanvasImageSource, sx, sy, sw, sh, dx, dy, drawW, drawH);
+      if (source) ctx.drawImage(source, 0, 0, source.width, source.height, dx, dy, drawW, drawH);
+      else ctx.drawImage(el as CanvasImageSource, sx, sy, sw, sh, dx, dy, drawW, drawH);
     } catch {
       /* element not decodable yet */
     }
+    ctx.filter = 'none';
+    const vignette = clip.effects?.vignette ?? 0;
+    if (vignette > 0) paintVignette(ctx, dx, dy, drawW, drawH, vignette);
     ctx.restore();
+  }
+
+  /**
+   * Green-screen preview. Keying is a per-pixel job, so it runs on a small
+   * scratch canvas — enough to judge the key by, while the export does it at
+   * full resolution in ffmpeg.
+   */
+  private keyed(el: Sourced, clip: Clip, sx: number, sy: number, sw: number, sh: number): HTMLCanvasElement | null {
+    const key = clip.chromaKey;
+    if (!key?.enabled) return null;
+    if (!this.keyCanvas) this.keyCanvas = document.createElement('canvas');
+    const canvas = this.keyCanvas;
+    const scale = Math.min(1, 640 / Math.max(1, sw));
+    const w = Math.max(2, Math.round(sw * scale));
+    const h = Math.max(2, Math.round(sh * scale));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.clearRect(0, 0, w, h);
+    try {
+      ctx.drawImage(el as CanvasImageSource, sx, sy, sw, sh, 0, 0, w, h);
+    } catch {
+      return null;
+    }
+
+    const target = hexToRgb(key.color || '#00ff00');
+    const similarity = Math.max(0.01, key.similarity ?? 0.3) * 441; // 441 ≈ max RGB distance
+    const blend = Math.max(0, key.blend ?? 0.12) * 441;
+    let frame: ImageData;
+    try {
+      frame = ctx.getImageData(0, 0, w, h);
+    } catch {
+      return null; // tainted canvas — should not happen for same-origin media
+    }
+    const data = frame.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const distance = Math.sqrt(
+        (data[i] - target.r) ** 2 + (data[i + 1] - target.g) ** 2 + (data[i + 2] - target.b) ** 2
+      );
+      if (distance < similarity) data[i + 3] = 0;
+      else if (blend > 0 && distance < similarity + blend) {
+        data[i + 3] = Math.round(data[i + 3] * ((distance - similarity) / blend));
+      }
+    }
+    ctx.putImageData(frame, 0, 0);
+    return canvas;
   }
 
   private drawWatermark(ctx: CanvasRenderingContext2D, W: number, H: number) {
@@ -439,6 +520,186 @@ export class PreviewEngine {
 
 // ---- drawing helpers -------------------------------------------------------
 
+function hexToRgb(hex: string) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex));
+  return m ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) } : { r: 0, g: 255, b: 0 };
+}
+
+/** Darkened corners, drawn over the clip's own rect. */
+function paintVignette(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, amount: number) {
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const radius = Math.max(w, h) * 0.72;
+  const gradient = ctx.createRadialGradient(cx, cy, radius * 0.35, cx, cy, radius);
+  gradient.addColorStop(0, 'rgba(0,0,0,0)');
+  gradient.addColorStop(1, `rgba(0,0,0,${Math.min(0.92, amount).toFixed(2)})`);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  ctx.fillStyle = gradient;
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+}
+
+/**
+ * Clip the context to the part of the frame the incoming clip should occupy
+ * partway through a transition, or set its alpha for the dissolve family.
+ * Approximates ffmpeg's xfade closely enough to time a cut by.
+ */
+function applyTransitionMask(ctx: CanvasRenderingContext2D, type: string, progress: number, W: number, H: number) {
+  const clipRect = (x: number, y: number, w: number, h: number) => {
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+  };
+  switch (type) {
+    case 'wipeleft':
+      clipRect(W * (1 - progress), 0, W * progress, H);
+      break;
+    case 'wiperight':
+      clipRect(0, 0, W * progress, H);
+      break;
+    case 'wipeup':
+      clipRect(0, H * (1 - progress), W, H * progress);
+      break;
+    case 'wipedown':
+      clipRect(0, 0, W, H * progress);
+      break;
+    case 'slideleft':
+      clipRect(W * (1 - progress), 0, W * progress, H);
+      ctx.translate(W * (1 - progress), 0);
+      break;
+    case 'slideright':
+      clipRect(0, 0, W * progress, H);
+      ctx.translate(-W * (1 - progress), 0);
+      break;
+    case 'slideup':
+      clipRect(0, H * (1 - progress), W, H * progress);
+      ctx.translate(0, H * (1 - progress));
+      break;
+    case 'slidedown':
+      clipRect(0, 0, W, H * progress);
+      ctx.translate(0, -H * (1 - progress));
+      break;
+    case 'circleopen':
+    case 'circlecrop':
+      ctx.beginPath();
+      ctx.arc(W / 2, H / 2, Math.hypot(W, H) * 0.5 * progress, 0, Math.PI * 2);
+      ctx.clip();
+      break;
+    case 'circleclose':
+      ctx.beginPath();
+      ctx.arc(W / 2, H / 2, Math.hypot(W, H) * 0.5 * (1 - progress), 0, Math.PI * 2);
+      ctx.clip();
+      break;
+    case 'rectcrop':
+      clipRect(W / 2 - (W / 2) * progress, H / 2 - (H / 2) * progress, W * progress, H * progress);
+      break;
+    case 'vertopen':
+      clipRect(W / 2 - (W / 2) * progress, 0, W * progress, H);
+      break;
+    case 'horzopen':
+      clipRect(0, H / 2 - (H / 2) * progress, W, H * progress);
+      break;
+    case 'pixelize':
+    case 'hblur':
+      ctx.globalAlpha *= progress;
+      ctx.filter = `blur(${((1 - progress) * 12).toFixed(1)}px)`;
+      break;
+    default:
+      // fade, dissolve, fadeblack, fadewhite, radial, distance, diagonals…
+      ctx.globalAlpha *= progress;
+      break;
+  }
+}
+
+/** Canvas twin of the ASS vector shapes drawn on export. */
+function shapeOutline(ctx: CanvasRenderingContext2D, kind: string, x: number, y: number, w: number, h: number, radius: number) {
+  ctx.beginPath();
+  switch (kind) {
+    case 'ellipse':
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+      break;
+    case 'triangle':
+      ctx.moveTo(x + w / 2, y);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      break;
+    case 'arrow': {
+      const shaft = h * 0.34;
+      const headW = w * 0.36;
+      const top = y + (h - shaft) / 2;
+      ctx.moveTo(x, top);
+      ctx.lineTo(x + w - headW, top);
+      ctx.lineTo(x + w - headW, y);
+      ctx.lineTo(x + w, y + h / 2);
+      ctx.lineTo(x + w - headW, y + h);
+      ctx.lineTo(x + w - headW, top + shaft);
+      ctx.lineTo(x, top + shaft);
+      ctx.closePath();
+      break;
+    }
+    case 'star': {
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      const outer = Math.min(w, h) / 2;
+      const inner = outer * 0.42;
+      for (let i = 0; i < 10; i += 1) {
+        const r = i % 2 === 0 ? outer : inner;
+        const angle = (Math.PI / 5) * i - Math.PI / 2;
+        const px = cx + r * Math.cos(angle);
+        const py = cy + r * Math.sin(angle);
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      break;
+    }
+    case 'roundrect': {
+      const r = Math.max(0, Math.min(radius, Math.min(w, h) / 2));
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+      break;
+    }
+    default:
+      ctx.rect(x, y, w, h);
+      break;
+  }
+}
+
+export function drawShape(ctx: CanvasRenderingContext2D, clip: Clip, time: number, W: number, H: number) {
+  const shape = clip.shape;
+  if (!shape) return;
+  const w = shape.width * W;
+  const h = shape.height * H;
+  const x = shape.x * W - w / 2;
+  const y = shape.y * H - h / 2;
+
+  ctx.save();
+  ctx.globalAlpha = (clip.transform?.opacity ?? 1) * fadeGain(clip, time);
+  if (clip.transform?.rotation) {
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate((clip.transform.rotation * Math.PI) / 180);
+    ctx.translate(-(x + w / 2), -(y + h / 2));
+  }
+  shapeOutline(ctx, shape.kind, x, y, w, h, (shape.radius ?? 0.15) * Math.min(w, h));
+  if (shape.filled !== false) {
+    ctx.fillStyle = shape.color || '#7b61ff';
+    ctx.fill();
+  }
+  if ((shape.strokeWidth ?? 0) > 0) {
+    ctx.lineWidth = (shape.strokeWidth ?? 0) * (Math.min(W, H) / 1080);
+    ctx.strokeStyle = shape.strokeColor || '#ffffff';
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 const clampUnit = (v: number) => Math.max(0, Math.min(0.95, v || 0));
 
 function naturalSize(el: Sourced, media: Media) {
@@ -463,6 +724,12 @@ function cssFilter(clip: Clip): string {
   if (fx.saturation != null && fx.saturation !== 1) parts.push(`saturate(${fx.saturation})`);
   if (fx.hue) parts.push(`hue-rotate(${fx.hue}deg)`);
   if (fx.blur) parts.push(`blur(${fx.blur}px)`);
+  if (fx.temperature) {
+    // Warm shifts towards sepia, cool towards blue — a rough stand-in for
+    // ffmpeg's colortemperature, close enough to judge framing by.
+    parts.push(fx.temperature > 0 ? `sepia(${(fx.temperature * 0.35).toFixed(2)})` : `hue-rotate(${(-fx.temperature * 14).toFixed(0)}deg)`);
+  }
+  if (fx.filmFade) parts.push(`contrast(${(1 - fx.filmFade * 0.25).toFixed(2)}) brightness(${(1 + fx.filmFade * 0.08).toFixed(2)})`);
   if (fx.grayscale) parts.push('grayscale(1)');
   if (fx.invert) parts.push('invert(1)');
   return parts.join(' ');

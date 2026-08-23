@@ -1,9 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { PreviewEngine } from '../engine/preview';
 import { formatTime, projectDuration } from '../lib/model';
 import { useEditor } from '../state/store';
-import { Button, Icon } from './ui';
+import { Button, Icon, Menu } from './ui';
+import { CanvasHandles } from './CanvasHandles';
+
+const ZOOM_STEPS = [0.25, 0.5, 0.75, 1];
 
 export function Preview() {
   const project = useEditor((s) => s.project);
@@ -15,20 +18,21 @@ export function Preview() {
   const toggleLoop = useEditor((s) => s.toggleLoop);
   const setStatus = useEditor((s) => s.setStatus);
   const setError = useEditor((s) => s.setError);
+  const select = useEditor((s) => s.select);
+  const library = useEditor((s) => s.library);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<PreviewEngine | null>(null);
   const [grabbing, setGrabbing] = useState(false);
+  const [fit, setFit] = useState<number | 'fit'>('fit');
 
   const duration = project ? projectDuration(project) : 0;
   const fps = project?.settings.fps ?? 30;
 
-  // The engine owns the clock while playing; React only follows along.
   useEffect(() => {
     const engine = new PreviewEngine(api.fileUrl);
     engineRef.current = engine;
-    // If the browser cannot decode a file (iPhone HEVC, ProRes, …), quietly
-    // build a preview proxy and carry on. Exports still use the original.
     engine.setProxyResolver(async (media) => {
       useEditor.getState().setStatus(`Preparing a preview copy of ${media.name}…`);
       try {
@@ -64,6 +68,11 @@ export function Preview() {
     if (project) engineRef.current?.setProject(project);
   }, [project]);
 
+  // Keep the canvas colour maths in step with the server's look presets.
+  useEffect(() => {
+    if (library) engineRef.current?.setFilterCss(Object.fromEntries(library.filters.map((f) => [f.id, f.css])));
+  }, [library]);
+
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
@@ -71,7 +80,6 @@ export function Preview() {
     else engine.pause();
   }, [playing]);
 
-  // Only push the playhead into the engine when *we* moved it (scrub, jump).
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
@@ -79,7 +87,6 @@ export function Preview() {
   }, [playhead]);
 
   const aspect = project ? `${project.settings.width} / ${project.settings.height}` : '16 / 9';
-
   const step = (frames: number) => {
     setPlaying(false);
     setPlayhead(Math.max(0, playhead + frames / fps));
@@ -89,8 +96,8 @@ export function Preview() {
     if (!project) return;
     setGrabbing(true);
     try {
-      const result = await api.still(project, playhead, `${project.name}-thumb`);
-      setStatus(`Saved still → ${result.filename}`);
+      const result = await api.still(project, playhead, `${project.name}-thumbnail`);
+      setStatus(`Saved ${result.filename} to your exports folder`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -98,14 +105,21 @@ export function Preview() {
     }
   };
 
+  const frameStyle: React.CSSProperties =
+    fit === 'fit'
+      ? { aspectRatio: aspect, maxWidth: '100%', maxHeight: '100%' }
+      : { aspectRatio: aspect, width: `${(project?.settings.width ?? 1920) * fit}px`, maxWidth: '100%' };
+
   return (
     <div className="preview">
-      <div className="preview-stage">
-        <div className="preview-frame" style={{ aspectRatio: aspect }}>
+      <div className="preview-stage" onPointerDown={(e) => e.target === e.currentTarget && select(null)}>
+        <div className="preview-frame" ref={frameRef} style={frameStyle}>
           <canvas ref={canvasRef} />
+          <CanvasHandles frame={frameRef.current} />
           {!project?.tracks.some((t) => t.clips.length) ? (
             <div className="preview-placeholder">
-              <p>Drop footage into the timeline to start editing</p>
+              <span>{Icon.film}</span>
+              <p>Add media from the left to get started</p>
             </div>
           ) : null}
         </div>
@@ -118,58 +132,52 @@ export function Preview() {
         </div>
 
         <div className="transport-buttons">
-          <Button variant="ghost" size="sm" title="Go to start (Home)" onClick={() => { setPlaying(false); setPlayhead(0); }}>
+          <button type="button" className="icon-button" title="Go to start (Home)" onClick={() => { setPlaying(false); setPlayhead(0); }}>
             {Icon.skipStart}
-          </Button>
-          <Button variant="ghost" size="sm" title="Back one frame (←)" onClick={() => step(-1)}>
-            ◀|
-          </Button>
-          <Button variant="primary" size="md" title="Play / pause (Space)" onClick={() => setPlaying(!playing)}>
+          </button>
+          <button type="button" className="icon-button" title="Back one frame (←)" onClick={() => step(-1)}>
+            {Icon.frameBack}
+          </button>
+          <button type="button" className="play-button" title="Play / pause (Space)" onClick={() => setPlaying(!playing)}>
             {playing ? Icon.pause : Icon.play}
-          </Button>
-          <Button variant="ghost" size="sm" title="Forward one frame (→)" onClick={() => step(1)}>
-            |▶
-          </Button>
-          <Button variant="ghost" size="sm" title="Go to end (End)" onClick={() => { setPlaying(false); setPlayhead(duration); }}>
+          </button>
+          <button type="button" className="icon-button" title="Forward one frame (→)" onClick={() => step(1)}>
+            {Icon.frameNext}
+          </button>
+          <button type="button" className="icon-button" title="Go to end (End)" onClick={() => { setPlaying(false); setPlayhead(duration); }}>
             {Icon.skipEnd}
-          </Button>
+          </button>
         </div>
 
         <div className="transport-right">
-          <Button variant="ghost" size="sm" active={loop} onClick={toggleLoop} title="Loop playback (L)">
-            Loop
-          </Button>
+          <button type="button" className={`icon-button${loop ? ' is-active' : ''}`} title="Loop playback (L)" onClick={toggleLoop}>
+            {Icon.rotate}
+          </button>
           <Button variant="ghost" size="sm" onClick={grabFrame} disabled={grabbing || !project} title="Save this frame as a PNG for your thumbnail">
             {Icon.camera} {grabbing ? 'Saving…' : 'Grab frame'}
           </Button>
+          <Menu
+            trigger={({ toggle }) => (
+              <button type="button" className="zoom-trigger" onClick={toggle}>
+                {fit === 'fit' ? 'Fit' : `${Math.round(fit * 100)}%`} {Icon.chevronDown}
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                <button type="button" className="menu-item" onClick={() => { setFit('fit'); close(); }}>
+                  Fit to window
+                </button>
+                {ZOOM_STEPS.map((z) => (
+                  <button key={z} type="button" className="menu-item" onClick={() => { setFit(z); close(); }}>
+                    {Math.round(z * 100)}%
+                  </button>
+                ))}
+              </>
+            )}
+          </Menu>
         </div>
       </div>
-
-      <Scrubber duration={duration} playhead={playhead} onSeek={(t) => setPlayhead(t)} />
-    </div>
-  );
-}
-
-function Scrubber({ duration, playhead, onSeek }: { duration: number; playhead: number; onSeek: (t: number) => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const seekTo = (clientX: number) => {
-    const el = ref.current;
-    if (!el || duration <= 0) return;
-    const rect = el.getBoundingClientRect();
-    onSeek(Math.max(0, Math.min(duration, ((clientX - rect.left) / rect.width) * duration)));
-  };
-  return (
-    <div
-      className="scrubber"
-      ref={ref}
-      onPointerDown={(e) => {
-        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-        seekTo(e.clientX);
-      }}
-      onPointerMove={(e) => e.buttons === 1 && seekTo(e.clientX)}
-    >
-      <span className="scrubber-fill" style={{ width: duration > 0 ? `${(playhead / duration) * 100}%` : '0%' }} />
-      <span className="scrubber-knob" style={{ left: duration > 0 ? `${(playhead / duration) * 100}%` : '0%' }} />
     </div>
   );
 }

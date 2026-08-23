@@ -1,8 +1,9 @@
 # JumpCut
 
-A video editor for making YouTube content. It runs on your own machine — the
-editor is a web UI, the rendering is real `ffmpeg`. Your footage never leaves
-your computer, there's no account, no subscription, and no watermark.
+A Clipchamp-style video editor for making YouTube content. It runs on your own
+machine — the editor is a web UI, the rendering is real `ffmpeg`. Your footage
+never leaves your computer, there's no account, no subscription, no upload
+limits, and no watermark.
 
 ```bash
 npm install
@@ -16,33 +17,55 @@ bundled build automatically.
 
 ## What it does
 
+The layout will look familiar if you've used Clipchamp: a tool rail down the
+left, your video in the middle with drag-to-move handles on it, properties on
+the right, timeline along the bottom.
+
+**The left rail**
+
+| | |
+| --- | --- |
+| **Your media** | Import by drag-and-drop, or link files already on disk without copying them |
+| **Record & create** | Record your camera, your screen, or a voiceover straight into the project |
+| **Content library** | Solid backgrounds and vector shapes — rectangles, circles, arrows, stars |
+| **Templates** | Five layouts that arrange titles and shapes around *your* footage |
+| **Transitions** | 24 transitions — fades, wipes, slides, circles, pixelise, blur |
+| **Text** | Eight title styles with entrance animations |
+| **Captions** | Import `.srt`, re-wrap, restyle, burn in or export |
+| **Brand kit** | Your colours, font and logo, applied to new titles and shapes |
+
 **Editing**
 
 - Multi-track timeline — drag clips around, trim their edges, drag them between
   tracks, split at the playhead, ripple-delete to close the gap
+- **Drag, resize and rotate right on the video** — corner handles to scale, a
+  stem above to rotate (hold Shift to snap to 15°)
 - Live preview that composites on a canvas using the same layout maths as the
   export, so what you see is what you render
-- Filmstrip thumbnails and audio waveforms drawn right on the clips
-- Transform per clip: fit/fill/stretch, scale, position, rotate, opacity, crop
-- Colour: brightness, contrast, saturation, hue, blur, sharpen, black & white
-- Speed changes from 0.1× to 8× (audio pitch-corrects automatically)
-- Fades on any clip, video and audio
+- Filmstrip thumbnails and audio waveforms drawn on the clips
+- Canvas shape switcher — 16:9, 9:16, 1:1, 4:5, 21:9 — from the top bar
 - Unlimited undo/redo, autosave, multiple projects
+
+**Effects**
+
+- **Transitions** between touching clips. Dropping one overlaps the two clips
+  and pulls the rest of the timeline back, exactly as you'd expect; the audio
+  cross-fades with the picture.
+- **12 filter presets** — Vivid, Punch, Warm, Cool, Faded, Vintage, Sepia,
+  Mono, Noir, Cinematic, Dreamy
+- **Adjust colours** — exposure, contrast, saturation, temperature, hue,
+  vignette, film fade, blur, sharpen
+- **Green screen** — chroma key with tolerance, edge softness and spill removal
+- Per-clip transform, crop, speed (0.1×–8×) and fades
 
 **The YouTube-specific parts**
 
 - **Remove silences** — one click turns a rambling take into tight jump cuts.
   Finds every pause, drops it, closes the gaps, keeps a little breathing room
   either side so words aren't clipped.
-- **Titles** with outlines, drop shadows, background boxes and wrapping, plus
-  presets for big titles, lower thirds, chapter cards and subscribe nudges
-- **Captions** — import an `.srt`, re-wrap it to two readable lines, or convert
-  it to punchy 3-word chunks for Shorts. Burn them into the picture, or export
-  a clean `.srt` to upload alongside the video.
 - **Music ducking** — the music bed automatically drops under your voice
 - **Loudness normalisation** aimed at YouTube's −14 LUFS target
 - **Grab frame** saves the current frame as a full-resolution PNG for thumbnails
-- **Watermark/logo** overlay in any corner
 - **Export presets** for 4K / 1440p / 1080p / 1080p60 / 720p, plus vertical
   Shorts, square, GIF, and audio-only. Exporting a 16:9 edit as a 9:16 Short
   offers crop-to-fill, letterbox, or blurred-edges reframing.
@@ -99,26 +122,34 @@ npm run dev        # server on :5174, editor on :5173
 npm test
 ```
 
-This generates test footage, renders a real project through the full pipeline,
-and checks the output — 16 checks covering probing, waveforms, silence
-detection, compositing, vertical reframing and still export.
+This generates test footage, renders real projects through the full pipeline,
+and checks the output — 22 checks covering probing, waveforms, silence
+detection, compositing, transitions, filters, green screen, vertical reframing
+and still export.
 
 ---
 
 ## A first edit
 
-1. **Import** — drag files onto the Media panel, or hit **Browse** to link
-   footage already on disk without copying it.
+1. **Import** — drag files onto Your media, or hit **Browse** to link footage
+   already on disk without copying it. **Record & create** captures your camera
+   or screen if you'd rather film something now.
 2. **Build the timeline** — drag a clip onto V1. Drop b-roll onto V2 and it
-   layers on top; use **Make PiP** in the inspector to shrink it into a corner.
-3. **Cut the fat** — select your talking-head clip and use **Remove silences**
-   in the inspector. Start at −32 dB with a 0.45 s minimum pause.
-4. **Add a title** — press <kbd>T</kbd>, type, then pick a preset.
-5. **Add music** — drop a track onto A2 Music. Ducking is on by default, so it
+   layers on top; drag it around directly on the video, or hit
+   **Picture-in-picture** in the properties panel to tuck it into a corner.
+3. **Join the cuts** — click the **+** badge that appears between two touching
+   clips, then pick a transition. Right-click the badge to remove it.
+4. **Cut the fat** — select your talking-head clip, open the **Audio** tab and
+   use **Remove silences**. Start at −32 dB with a 0.45 s minimum pause.
+5. **Add a title** — open **Text**, click a style. Change the animation, colour
+   and position in the properties panel, or drag it on the video.
+6. **Grade it** — the **Filters** tab has twelve looks; **Adjust** has the
+   manual sliders underneath.
+7. **Add music** — drop a track onto A2 Music. Ducking is on by default, so it
    pulls back automatically whenever you speak.
-6. **Captions** — the Captions tab imports `.srt` files, re-wraps them and
+8. **Captions** — the Captions tab imports `.srt` files, re-wraps them and
    styles them. Turn on "Burn captions into the video" for Shorts.
-7. **Export** — <kbd>⌘E</kbd>, pick a preset, go. Files land in
+9. **Export** — <kbd>⌘E</kbd>, pick a preset, go. Files land in
    `~/JumpCut/exports`.
 
 ---
@@ -195,16 +226,27 @@ after upload.
   libass; JumpCut uses it for both. If yours has neither libass nor `drawtext`,
   the export still works but text won't burn in — the editor tells you and you
   can export an `.srt` instead. `npm test` reports which renderer you have.
-- **Titles always render above video clips**, regardless of which track they sit
-  on. In practice that's what you want; it's a deliberate simplification.
+- **Titles, shapes and captions always render above the footage**, regardless
+  of which track they sit on. Among themselves the order is shapes, then
+  titles, then captions. In practice that's what you want; it's a deliberate
+  simplification.
+- **Transitions need two touching clips on the same track.** They overlap the
+  clips, so the timeline gets shorter by the transition's length.
+- **Green screen previews at reduced resolution** — keying is a per-pixel job,
+  so the canvas does it on a small scratch buffer. The export keys at full
+  resolution in ffmpeg.
 - **Loudness normalisation is single-pass**, so it lands within a couple of LU
   of the target rather than exactly on it. YouTube normalises on their side
   anyway, so this only matters if you're mastering for somewhere else.
 - **Ducking isn't previewed** — the preview plays raw track levels. It's applied
   on export.
 - **The preview is a canvas composite, not a decode of the final file.** Colour
-  handling in the browser can differ slightly from ffmpeg's. Framing, timing,
-  scale and type size all match.
+  handling in the browser can differ slightly from ffmpeg's, and transitions
+  are approximated with clipping and alpha rather than ffmpeg's exact `xfade`
+  maths. Framing, timing, scale and type size all match.
+- **Recording needs a secure context.** `localhost` counts as one, so it works
+  out of the box; if you serve JumpCut from another machine, use HTTPS or the
+  browser will refuse camera and screen access.
 
 ---
 
@@ -239,20 +281,34 @@ server/src/
   presets.js    export targets and encoder selection
   media.js      probing, thumbnails, waveforms, silence detection, proxies
   captions.js   .srt/.vtt parsing, re-wrapping, local speech-to-text
+  looks.js      filter presets, transitions, shape geometry
   render.js     export jobs with progress, cancellation and readable errors
   projects.js   project files on disk
   index.js      HTTP API
 
 web/src/
   engine/preview.ts   canvas compositor — the browser twin of compile.js
-  components/         timeline, preview, media bin, inspector, captions, export
+  components/         rail, timeline, preview, canvas handles, properties
+  components/panels/  media, record, content, templates, transitions, text,
+                      captions, brand kit
   state/store.ts      editor state, undo/redo, autosave
 ```
+
+`server/src/looks.js` holds the filter presets, transition list and shape
+geometry, and the editor fetches them from `/api/library` — so the preview and
+the export can never drift apart on what "Cinematic" means.
 
 The interesting part is `compile.js`. Every clip becomes its own ffmpeg input
 with `-ss`/`-t` applied *before* `-i`, so ffmpeg seeks instead of decoding whole
 files. The graph then only has to position, transform and mix streams that are
 already trimmed — which is why exports are fast even with a lot of cuts.
+
+Clips joined by transitions are grouped into chains, composited onto
+transparent full-size frames and joined with `xfade` (which insists both inputs
+share a size and a constant frame rate); everything else is overlaid directly.
+Titles, shapes and captions are compiled into a single ASS subtitle file and
+burned in with one libass pass, so a hundred captions cost one filter rather
+than a hundred.
 
 ## Licence
 

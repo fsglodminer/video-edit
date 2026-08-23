@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../lib/api';
-import type { Media } from '../lib/types';
-import { addTrack, appendPosition, useEditor } from '../state/store';
-import { findFreeSlot, formatBytes, formatTime, makeClip } from '../lib/model';
-import { Button, Empty, Icon, Panel, useAsyncAction } from './ui';
+import { api } from '../../lib/api';
+import type { Media } from '../../lib/types';
+import { addTrack, appendPosition, useEditor } from '../../state/store';
+import { findFreeSlot, formatBytes, formatTime, makeClip } from '../../lib/model';
+import { Button, Empty, Icon, Panel, useAsyncAction } from '../ui';
 
-export function MediaBin() {
+export function MediaPanel() {
   const project = useEditor((s) => s.project);
   const addMedia = useEditor((s) => s.addMedia);
   const commit = useEditor((s) => s.commit);

@@ -14,6 +14,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { capabilities } from './ffmpeg.js';
 import { familyName } from './fontinfo.js';
+import { findFilter, findTransition, shapePath } from './looks.js';
 
 export const DEFAULT_SETTINGS = {
   width: 1920,
@@ -136,6 +137,11 @@ function layout(clip, media, settings) {
   };
 }
 
+/** The chosen look preset, as ffmpeg filters. */
+function lookFilters(clip) {
+  return [...findFilter(clip.filter).ff];
+}
+
 /** Colour / sharpness adjustments, only emitted when they differ from neutral. */
 function effectFilters(clip) {
   const fx = clip.effects || {};
@@ -153,19 +159,28 @@ function effectFilters(clip) {
   if (blur > 0) out.push(`gblur=sigma=${r2(blur)}`);
   const sharpen = clamp(num(fx.sharpen), 0, 3);
   if (sharpen > 0) out.push(`unsharp=5:5:${r2(sharpen)}:5:5:0`);
+  const temperature = clamp(num(fx.temperature), -1, 1);
+  if (temperature) {
+    // -1 = 3000K (cold) … +1 = 10000K (warm)
+    out.push(`colortemperature=temperature=${Math.round(6500 + temperature * 3500)}:mix=1`);
+  }
+  const vignette = clamp(num(fx.vignette), 0, 1);
+  if (vignette > 0) out.push(`vignette=angle=${r2((Math.PI / 5) * (0.6 + vignette))}:mode=forward`);
+  const filmFade = clamp(num(fx.filmFade), 0, 1);
+  if (filmFade > 0) out.push(`curves=all='0/${r2(filmFade * 0.16)} 1/1'`);
   if (fx.grayscale) out.push('hue=s=0');
   if (fx.invert) out.push('negate');
   return out;
 }
 
 function isRenderableVideo(clip, media) {
-  if (clip.type === 'text' || clip.type === 'solid') return true;
+  if (clip.type === 'text' || clip.type === 'solid' || clip.type === 'shape') return true;
   if (clip.type === 'image') return true;
   return Boolean(media && media.hasVideo);
 }
 
 function hasAudio(clip, media) {
-  if (clip.type === 'text' || clip.type === 'solid' || clip.type === 'image') return false;
+  if (clip.type === 'text' || clip.type === 'solid' || clip.type === 'image' || clip.type === 'shape') return false;
   if (clip.muted) return false;
   return Boolean(media && media.hasAudio);
 }
@@ -206,6 +221,7 @@ export function compile(project, opts = {}) {
   // leave dangling filter outputs and ffmpeg refuses to bind the graph.
   const wantAudio = !opts.stillFrame && !opts.gif;
 
+  const { filters: availableFilters } = capabilities();
   const media = mediaById(project);
   const inputs = [];   // { args: [...], clip }
   const filters = [];
@@ -228,102 +244,216 @@ export function compile(project, opts = {}) {
   let vIndex = 0;
 
   const textOverlays = [];
+  const shapeOverlays = [];
+
+  const nextLabel = (prefix) => `${prefix}${vIndex++}`;
+
+  /** Overlay expression for a clip's offset from centre. */
+  const offsetExpr = (axis, offset) => {
+    const base = axis === 'x' ? '(W-w)/2' : '(H-h)/2';
+    if (!offset) return base;
+    return `${base}${offset > 0 ? '+' : ''}${offset}`;
+  };
+
+  /**
+   * Emit the filter chain for one visual clip and return its stream label.
+   *
+   * `fullCanvas` composites the result onto a transparent W×H frame. xfade
+   * requires both of its inputs to share a size, so every clip taking part in
+   * a transition goes through that extra step.
+   */
+  const emitClipVideo = (item, { fullCanvas = false } = {}) => {
+    const { clip, media: m, localDur, trimHead } = item;
+    const speed = clamp(num(clip.speed, 1), 0.05, 20);
+    const chain = [];
+    let idx;
+
+    if (clip.type === 'solid') {
+      const color = ffColor(clip.color || '#000000', 'black');
+      idx = addInput(['-f', 'lavfi', '-t', String(r2(localDur)), '-i', `color=c=${color}:s=${W}x${H}:r=${fps}`]);
+      chain.push('format=rgba');
+    } else if (clip.type === 'image') {
+      if (!m?.path) return null;
+      idx = addInput(['-loop', '1', '-framerate', String(fps), '-t', String(r2(localDur)), '-i', m.path]);
+      chain.push('format=rgba');
+    } else {
+      if (!m?.path) return null;
+      const srcIn = num(clip.inPoint) + trimHead * speed;
+      const srcDur = localDur * speed;
+      idx = addInput(['-ss', String(r2(Math.max(0, srcIn))), '-t', String(r2(srcDur + 0.05)), '-i', m.path]);
+      chain.push('setpts=PTS-STARTPTS');
+      if (speed !== 1) chain.push(`setpts=PTS/${r2(speed)}`);
+      chain.push(`fps=${fps}`);
+      chain.push('format=rgba');
+    }
+
+    // Green screen runs on the original pixels, before any scaling blurs the edges.
+    const key = clip.chromaKey;
+    if (key?.enabled) {
+      const similarity = clamp(num(key.similarity, 0.3), 0.01, 1);
+      const blend = clamp(num(key.blend, 0.12), 0, 1);
+      chain.push(`colorkey=color=${ffColor(key.color || '#00ff00', '0x00ff00')}:similarity=${r2(similarity)}:blend=${r2(blend)}`);
+      if (key.despill !== false && availableFilters.has('despill')) {
+        chain.push(`despill=type=${/#?0*0?0ff00/i.test(key.color || '#00ff00') ? 'green' : 'blue'}:mix=0.5:expand=0`);
+      }
+    }
+
+    const L = layout(clip, m, settings);
+    if (L.cropFilter) chain.push(L.cropFilter);
+    if (clip.type !== 'solid') {
+      chain.push(`scale=${L.drawW}:${L.drawH}:flags=bicubic`);
+      if (L.cover && (L.drawW > W || L.drawH > H)) {
+        chain.push(`crop=${Math.min(W, L.drawW)}:${Math.min(H, L.drawH)}`);
+      }
+    }
+    chain.push(...lookFilters(clip));
+    chain.push(...effectFilters(clip));
+    if (L.rotation) {
+      const radians = r2((L.rotation * Math.PI) / 180);
+      chain.push(`rotate=${radians}:ow=rotw(${radians}):oh=roth(${radians}):c=0x00000000`);
+    }
+    if (L.opacity < 1) chain.push(`colorchannelmixer=aa=${r2(L.opacity)}`);
+
+    chain.push(`trim=duration=${r2(localDur)}`, 'setpts=PTS-STARTPTS');
+
+    const fadeIn = clamp(num(clip.fadeIn), 0, localDur / 2);
+    const fadeOut = clamp(num(clip.fadeOut), 0, localDur / 2);
+    if (fadeIn > 0) chain.push(`fade=t=in:st=0:d=${r2(fadeIn)}:alpha=1`);
+    if (fadeOut > 0) chain.push(`fade=t=out:st=${r2(localDur - fadeOut)}:d=${r2(fadeOut)}:alpha=1`);
+
+    item.inputIndex = idx;
+    const label = nextLabel('vc');
+    filters.push(`[${idx}:v]${chain.join(',')}[${label}]`);
+    if (!fullCanvas) return { label, layout: L };
+
+    const canvasLabel = nextLabel('vf');
+    filters.push(`color=c=black@0:s=${W}x${H}:r=${fps}:d=${r2(localDur)},format=rgba[${canvasLabel}b]`);
+    // xfade demands a constant frame rate on both inputs, and `setpts` clears
+    // it — so `fps` has to come last, after the trim.
+    filters.push(
+      `[${canvasLabel}b][${label}]overlay=x=${offsetExpr('x', L.offX)}:y=${offsetExpr('y', L.offY)}:eof_action=pass:repeatlast=0:format=auto,` +
+        `trim=duration=${r2(localDur)},setpts=PTS-STARTPTS,fps=${fps}[${canvasLabel}]`
+    );
+    return { label: canvasLabel, layout: L };
+  };
+
+  /** Drop a finished stream onto the accumulator at `startAt` seconds. */
+  const compositeOnto = (label, startAt, layoutInfo, { fullCanvas }) => {
+    let src = label;
+    if (startAt > 0) {
+      const padded = nextLabel('vp');
+      // `tpad` needs a known constant frame rate; trim+setpts clears it, so
+      // re-assert fps immediately before padding or the delay is silently dropped.
+      filters.push(`[${src}]fps=${fps},tpad=start_duration=${r2(startAt)}:start_mode=add:color=0x00000000[${padded}]`);
+      src = padded;
+    }
+    const out = nextLabel('vo');
+    const x = fullCanvas ? '0' : offsetExpr('x', layoutInfo.offX);
+    const y = fullCanvas ? '0' : offsetExpr('y', layoutInfo.offY);
+    filters.push(`[${vLabel}][${src}]overlay=x=${x}:y=${y}:eof_action=pass:repeatlast=0:format=auto[${out}]`);
+    vLabel = out;
+  };
 
   for (const track of [...videoTracks].reverse()) {
     if (track.hidden) continue;
-    for (const clip of track.clips || []) {
+
+    // Gather everything visible in the requested range, in timeline order.
+    const items = [];
+    for (const clip of [...(track.clips || [])].sort((a, b) => num(a.start) - num(b.start))) {
       const m = clip.mediaId ? media.get(clip.mediaId) : null;
       if (!isRenderableVideo(clip, m)) continue;
 
       const cStart = num(clip.start);
       const cDur = Math.max(0.02, num(clip.duration));
       const cEnd = cStart + cDur;
-      // Skip clips entirely outside the requested render range.
       if (cEnd <= rangeStart || cStart >= rangeEnd) continue;
 
-      // Position relative to the start of the render range.
       const visibleStart = Math.max(cStart, rangeStart);
       const visibleEnd = Math.min(cEnd, rangeEnd);
-      const localStart = r2(visibleStart - rangeStart);
-      const localDur = r2(visibleEnd - visibleStart);
-      const trimHead = visibleStart - cStart; // seconds skipped from the clip head
+      const item = {
+        clip,
+        media: m,
+        localStart: r2(visibleStart - rangeStart),
+        localDur: r2(visibleEnd - visibleStart),
+        trimHead: visibleStart - cStart,
+        clipped: visibleStart > cStart || visibleEnd < cEnd,
+      };
 
       if (clip.type === 'text') {
-        textOverlays.push({ clip, start: localStart, duration: localDur });
+        textOverlays.push({ clip, start: item.localStart, duration: item.localDur });
         continue;
       }
+      if (clip.type === 'shape') {
+        shapeOverlays.push({ clip, start: item.localStart, duration: item.localDur });
+        continue;
+      }
+      items.push(item);
+    }
 
-      const speed = clamp(num(clip.speed, 1), 0.05, 20);
-      const chain = [];
-      let idx;
-
-      if (clip.type === 'solid') {
-        const color = ffColor(clip.color || '#000000', 'black');
-        idx = addInput(['-f', 'lavfi', '-t', String(r2(localDur)), '-i', `color=c=${color}:s=${W}x${H}:r=${fps}`]);
-        chain.push('format=rgba');
-      } else if (clip.type === 'image') {
-        if (!m?.path) continue;
-        idx = addInput(['-loop', '1', '-framerate', String(fps), '-t', String(r2(localDur)), '-i', m.path]);
-        chain.push('format=rgba');
+    // Chain clips joined by a transition; anything else stands alone.
+    const groups = [];
+    for (const item of items) {
+      const previousGroup = groups[groups.length - 1];
+      const previous = previousGroup?.[previousGroup.length - 1];
+      const transition = findTransition(item.clip.transitionIn?.type);
+      const overlap = previous ? r2(previous.localStart + previous.localDur - item.localStart) : 0;
+      // A transition only makes sense where the clips actually overlap, and
+      // never across a range boundary that already cut one of them short.
+      const canChain =
+        previous && transition && overlap > 0.04 && !item.clipped && !previous.clipped &&
+        overlap < Math.min(previous.localDur, item.localDur) * 0.95;
+      if (canChain) {
+        item.transition = transition;
+        item.overlap = overlap;
+        previous.transitionOut = overlap;
+        previousGroup.push(item);
       } else {
-        if (!m?.path) continue;
-        const srcIn = num(clip.inPoint) + trimHead * speed;
-        const srcDur = localDur * speed;
-        idx = addInput(['-ss', String(r2(Math.max(0, srcIn))), '-t', String(r2(srcDur + 0.05)), '-i', m.path]);
-        chain.push('setpts=PTS-STARTPTS');
-        if (speed !== 1) chain.push(`setpts=PTS/${r2(speed)}`);
-        chain.push(`fps=${fps}`);
-        chain.push('format=rgba');
+        groups.push([item]);
       }
+    }
 
-      const L = layout(clip, m, settings);
-      if (L.cropFilter) chain.splice(clip.type === 'image' || clip.type === 'solid' ? 0 : 1, 0, L.cropFilter);
-      if (clip.type !== 'solid') {
-        chain.push(`scale=${L.drawW}:${L.drawH}:flags=bicubic`);
-        if (L.cover && (L.drawW > W || L.drawH > H)) {
-          chain.push(`crop=${Math.min(W, L.drawW)}:${Math.min(H, L.drawH)}`);
+    for (const group of groups) {
+      if (group.length === 1) {
+        const built = emitClipVideo(group[0]);
+        if (built) compositeOnto(built.label, group[0].localStart, built.layout, { fullCanvas: false });
+      } else {
+        let chainLabel = null;
+        let chainDur = 0;
+        for (const item of group) {
+          const built = emitClipVideo(item, { fullCanvas: true });
+          if (!built) continue;
+          if (!chainLabel) {
+            chainLabel = built.label;
+            chainDur = item.localDur;
+            continue;
+          }
+          const overlap = clamp(item.overlap, 0.05, Math.min(chainDur, item.localDur) * 0.95);
+          const out = nextLabel('vx');
+          filters.push(
+            `[${chainLabel}][${built.label}]xfade=transition=${item.transition.xfade}:duration=${r2(overlap)}:offset=${r2(chainDur - overlap)},fps=${fps}[${out}]`
+          );
+          chainLabel = out;
+          chainDur = r2(chainDur + item.localDur - overlap);
         }
+        if (chainLabel) compositeOnto(chainLabel, group[0].localStart, group[0], { fullCanvas: true });
       }
-      chain.push(...effectFilters(clip));
-      if (L.rotation) {
-        chain.push(`rotate=${r2((L.rotation * Math.PI) / 180)}:ow=rotw(${r2((L.rotation * Math.PI) / 180)}):oh=roth(${r2((L.rotation * Math.PI) / 180)}):c=0x00000000`);
-      }
-      if (L.opacity < 1) chain.push(`colorchannelmixer=aa=${r2(L.opacity)}`);
 
-      // Trim to exact length, then fade, then shift into place.
-      chain.push(`trim=duration=${r2(localDur)}`, 'setpts=PTS-STARTPTS');
-
-      const fadeIn = clamp(num(clip.fadeIn), 0, localDur / 2);
-      const fadeOut = clamp(num(clip.fadeOut), 0, localDur / 2);
-      if (fadeIn > 0) chain.push(`fade=t=in:st=0:d=${r2(fadeIn)}:alpha=1`);
-      if (fadeOut > 0) chain.push(`fade=t=out:st=${r2(localDur - fadeOut)}:d=${r2(fadeOut)}:alpha=1`);
-      // `tpad` needs a known constant frame rate; trim+setpts clears it, so
-      // re-assert fps immediately before padding or the delay is silently dropped.
-      if (localStart > 0) chain.push(`fps=${fps}`, `tpad=start_duration=${r2(localStart)}:start_mode=add:color=0x00000000`);
-
-      const src = `${idx}:v`;
-      const label = `vc${vIndex}`;
-      filters.push(`[${src}]${chain.join(',')}[${label}]`);
-
-      const outLabel = `vo${vIndex}`;
-      const x = L.offX === 0 ? '(W-w)/2' : `(W-w)/2${L.offX > 0 ? '+' : ''}${L.offX}`;
-      const y = L.offY === 0 ? '(H-h)/2' : `(H-h)/2${L.offY > 0 ? '+' : ''}${L.offY}`;
-      filters.push(`[${vLabel}][${label}]overlay=x=${x}:y=${y}:eof_action=pass:repeatlast=0:format=auto[${outLabel}]`);
-      vLabel = outLabel;
-      vIndex += 1;
-
-      // Audio that rides along with a video clip.
-      if (wantAudio && hasAudio(clip, m)) {
+      // Audio rides along with each clip whether or not it was chained.
+      for (const item of group) {
+        if (!wantAudio || !hasAudio(item.clip, item.media)) continue;
         const aLabel = pushAudio({
           filters,
-          input: `${idx}:a`,
+          input: `${item.inputIndex}:a`,
           index: audioLabels.length,
-          clip,
+          clip: item.clip,
           track,
-          localStart,
-          localDur,
-          speed,
+          localStart: item.localStart,
+          localDur: item.localDur,
+          speed: clamp(num(item.clip.speed, 1), 0.05, 20),
           sampleRate: settings.sampleRate,
+          // Transitions cross-fade the audio too, so the cut is never audible.
+          minFadeIn: item.overlap || 0,
+          minFadeOut: item.transitionOut || 0,
         });
         audioLabels.push(aLabel);
         audioGroups[track.role === 'music' ? 'music' : track.role === 'voice' ? 'voice' : 'other'].push(aLabel);
@@ -372,15 +502,15 @@ export function compile(project, opts = {}) {
   // instead of one drawtext per title, with real font shaping and wrapping.
   const fontFile = opts.fontFile || null;
   const capsOn = Boolean(project.captions?.enabled && (project.captions.items || []).length);
-  const { filters: availableFilters } = capabilities();
   const canAss = availableFilters.has('ass') || availableFilters.size === 0;
   const canDrawtext = availableFilters.has('drawtext');
   const warnings = [];
 
-  if (textOverlays.length || capsOn) {
+  if (textOverlays.length || shapeOverlays.length || capsOn) {
     if (canAss) {
       const doc = buildAssDocument({
         titles: textOverlays,
+        shapes: shapeOverlays,
         captions: capsOn ? project.captions : null,
         W,
         H,
@@ -493,7 +623,7 @@ export function compile(project, opts = {}) {
   return { args, duration, settings, inputCount: inputs.length, filterGraph: filters.join(';'), warnings };
 }
 
-function pushAudio({ filters, input, index, clip, track, localStart, localDur, speed, sampleRate }) {
+function pushAudio({ filters, input, index, clip, track, localStart, localDur, speed, sampleRate, minFadeIn = 0, minFadeOut = 0 }) {
   const chain = ['asetpts=PTS-STARTPTS'];
   if (speed !== 1) chain.push(...atempoChain(speed));
   chain.push(`aformat=sample_fmts=fltp:sample_rates=${sampleRate}:channel_layouts=stereo`);
@@ -502,8 +632,8 @@ function pushAudio({ filters, input, index, clip, track, localStart, localDur, s
   const gain = clamp(num(clip.volume, 1), 0, 4) * clamp(num(track.volume, 1), 0, 4);
   if (Math.abs(gain - 1) > 1e-3) chain.push(`volume=${r2(gain)}`);
 
-  const fadeIn = clamp(num(clip.audioFadeIn ?? clip.fadeIn), 0, localDur / 2);
-  const fadeOut = clamp(num(clip.audioFadeOut ?? clip.fadeOut), 0, localDur / 2);
+  const fadeIn = clamp(Math.max(num(clip.audioFadeIn ?? clip.fadeIn), minFadeIn), 0, localDur / 2);
+  const fadeOut = clamp(Math.max(num(clip.audioFadeOut ?? clip.fadeOut), minFadeOut), 0, localDur / 2);
   if (fadeIn > 0) chain.push(`afade=t=in:st=0:d=${r2(fadeIn)}`);
   if (fadeOut > 0) chain.push(`afade=t=out:st=${r2(localDur - fadeOut)}:d=${r2(fadeOut)}`);
 
@@ -663,7 +793,7 @@ const CAPTION_AN = {
  * editor previewed them; captions use ASS margins/alignment so they behave
  * like normal subtitles.
  */
-export function buildAssDocument({ titles = [], captions = null, W, H, fontFile, offset = 0 }) {
+export function buildAssDocument({ titles = [], shapes = [], captions = null, W, H, fontFile, offset = 0 }) {
   const unit = Math.min(W, H) / 1080; // keep type the same relative size at any canvas
   const baseFamily = fontFile ? familyName(fontFile) : 'Sans';
   const styles = [];
@@ -686,7 +816,7 @@ export function buildAssDocument({ titles = [], captions = null, W, H, fontFile,
       const start = num(c.start) - offset;
       const end = num(c.end) - offset;
       if (end <= 0 || !String(c.text || '').trim()) continue;
-      events.push(`Dialogue: 1,${assTime(Math.max(0, start))},${assTime(end)},Caption,,0,0,0,,${assText(c.text)}`);
+      events.push(`Dialogue: 2,${assTime(Math.max(0, start))},${assTime(end)},Caption,,0,0,0,,${assText(c.text)}`);
     }
   }
 
@@ -726,8 +856,65 @@ export function buildAssDocument({ titles = [], captions = null, W, H, fontFile,
     const opacity = clamp(num(item.clip.transform?.opacity, 1), 0, 1);
     if (opacity < 1) tags.push(`\\alpha&H${Math.round((1 - opacity) * 255).toString(16).padStart(2, '0').toUpperCase()}&`);
 
+    const animation = t.animation || 'none';
+    const enterMs = Math.round(clamp(num(t.animationDuration, 0.45), 0.05, 2) * 1000);
+    if (animation === 'slideup' || animation === 'slidedown') {
+      const travel = Math.round(size * 0.9) * (animation === 'slideup' ? 1 : -1);
+      tags.push(`\\move(${x},${y + travel},${x},${y},0,${enterMs})`);
+      if (!fadeIn) tags.push(`\\fad(${Math.round(enterMs * 0.7)},0)`);
+    } else if (animation === 'pop') {
+      tags.push(`\\fscx55\\fscy55\\t(0,${Math.round(enterMs * 0.7)},\\fscx106\\fscy106)`);
+      tags.push(`\\t(${Math.round(enterMs * 0.7)},${enterMs},\\fscx100\\fscy100)`);
+    }
+
+    const open = `{${tags.join('')}}`;
+    if (animation === 'typewriter') {
+      // Reveal a character at a time, keeping the untyped tail invisible so the
+      // line never reflows mid-animation.
+      const characters = [...content];
+      const perChar = Math.max(0.02, Math.min(0.09, (item.duration * 0.45) / Math.max(1, characters.length)));
+      for (let step = 1; step <= characters.length; step += 1) {
+        const from = item.start + (step - 1) * perChar;
+        const to = step === characters.length ? item.start + item.duration : item.start + step * perChar;
+        const shown = assText(characters.slice(0, step).join(''));
+        const hidden = assText(characters.slice(step).join(''));
+        const tail = hidden ? `{\\alpha&HFF&}${hidden}` : '';
+        events.push(`Dialogue: 1,${assTime(from)},${assTime(to)},T${i},,0,0,0,,${open}${shown}${tail}`);
+      }
+    } else {
+      events.push(`Dialogue: 1,${assTime(item.start)},${assTime(item.start + item.duration)},T${i},,0,0,0,,${open}${assText(content)}`);
+    }
+  });
+
+  // --- one style per shape clip, drawn with ASS vector commands ---
+  shapes.forEach((item, i) => {
+    const shape = item.clip.shape || {};
+    const w = Math.max(4, Math.round(clamp(num(shape.width, 0.3), 0.005, 4) * W));
+    const h = Math.max(4, Math.round(clamp(num(shape.height, 0.2), 0.005, 4) * H));
+    const strokeWidth = Math.max(0, num(shape.strokeWidth, 0)) * unit;
+    const filled = shape.filled !== false;
+
+    styles.push(
+      `Style: S${i},${baseFamily},20,${assColor(filled ? shape.color || '#6b4dff' : '#000000', filled ? 0 : 1)},` +
+        `${assColor(shape.color || '#6b4dff')},${assColor(shape.strokeColor || '#ffffff')},${assColor('#000000', 1)},` +
+        `0,0,0,0,100,100,0,0,1,${r2(strokeWidth)},0,7,0,0,0,1`
+    );
+
+    const cx = clamp(num(shape.x, 0.5), -1, 2) * W;
+    const cy = clamp(num(shape.y, 0.5), -1, 2) * H;
+    const tags = [`\\an7`, `\\pos(${Math.round(cx - w / 2)},${Math.round(cy - h / 2)})`];
+    const fadeIn = Math.round(clamp(num(item.clip.fadeIn), 0, item.duration / 2) * 1000);
+    const fadeOut = Math.round(clamp(num(item.clip.fadeOut), 0, item.duration / 2) * 1000);
+    if (fadeIn || fadeOut) tags.push(`\\fad(${fadeIn},${fadeOut})`);
+    const rotation = num(item.clip.transform?.rotation);
+    if (rotation) tags.push(`\\frz${r2(-rotation)}`, `\\org(${Math.round(cx)},${Math.round(cy)})`);
+    const opacity = clamp(num(item.clip.transform?.opacity, 1), 0, 1);
+    if (opacity < 1) tags.push(`\\alpha&H${Math.round((1 - opacity) * 255).toString(16).padStart(2, '0').toUpperCase()}&`);
+    tags.push('\\p1');
+
+    const radius = Math.round(clamp(num(shape.radius, 0.12), 0, 0.5) * Math.min(w, h));
     events.push(
-      `Dialogue: 0,${assTime(item.start)},${assTime(item.start + item.duration)},T${i},,0,0,0,,{${tags.join('')}}${assText(content)}`
+      `Dialogue: 0,${assTime(item.start)},${assTime(item.start + item.duration)},S${i},,0,0,0,,{${tags.join('')}}${shapePath(shape.kind || 'rect', w, h, radius)}`
     );
   });
 

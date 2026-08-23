@@ -16,6 +16,7 @@ import * as projects from './projects.js';
 import * as captions from './captions.js';
 import { filmstrip, poster, waveform, detectSilence, loudness, kindFor, proxy, proxyPath, wantsProxy } from './media.js';
 import { PRESETS } from './presets.js';
+import { FILTER_PRESETS, TRANSITIONS, TEXT_ANIMATIONS, SHAPES, BACKGROUNDS } from './looks.js';
 import { startExport, getJob, listJobs, cancelJob, jobEvents, renderFrame, exportStill, pruneJobs } from './render.js';
 import { projectDuration } from './compile.js';
 
@@ -64,6 +65,17 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/presets', (_req, res) => res.json({ presets: PRESETS }));
+
+/** Everything the content/effects panels offer, so the UI never hard-codes it. */
+app.get('/api/library', (_req, res) =>
+  res.json({
+    filters: FILTER_PRESETS.map(({ id, label, css }) => ({ id, label, css })),
+    transitions: TRANSITIONS.map(({ id, label, group }) => ({ id, label, group })),
+    textAnimations: TEXT_ANIMATIONS,
+    shapes: SHAPES,
+    backgrounds: BACKGROUNDS,
+  })
+);
 app.get('/api/fonts', (_req, res) => res.json({ fonts: listFonts().slice(0, 300), default: defaultFontFile() }));
 
 /** Minimal directory browser so media can be added by path without uploading. */

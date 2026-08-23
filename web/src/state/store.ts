@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import type { CaptionItem, Health, Job, Media, Project, Track } from '../lib/types';
+import type { CaptionItem, Health, Job, Library, Media, Project, Track } from '../lib/types';
+import type { PanelId } from '../components/Rail';
 import { clipEnd, findClip, projectDuration, uid } from '../lib/model';
 
 type Mutator = (draft: Project) => void;
@@ -9,6 +10,8 @@ type Mutator = (draft: Project) => void;
 interface EditorState {
   project: Project | null;
   health: Health | null;
+  library: Library | null;
+  fonts: { name: string; path: string }[];
   status: string;
   error: string | null;
   dirty: boolean;
@@ -22,7 +25,8 @@ interface EditorState {
   playing: boolean;
   loop: boolean;
   selection: string[];
-  activePanel: 'media' | 'text' | 'captions' | 'audio' | 'export';
+  activePanel: PanelId;
+  panelOpen: boolean;
   zoom: number;               // pixels per second
   scroll: number;             // timeline scroll offset in pixels
   snapping: boolean;
@@ -46,7 +50,8 @@ interface EditorState {
   setPlaying: (playing: boolean) => void;
   toggleLoop: () => void;
   select: (ids: string[] | string | null, options?: { additive?: boolean }) => void;
-  setPanel: (panel: EditorState['activePanel']) => void;
+  setPanel: (panel: PanelId) => void;
+  setPanelOpen: (open: boolean) => void;
   setZoom: (zoom: number) => void;
   setScroll: (scroll: number) => void;
   toggleSnapping: () => void;
@@ -67,6 +72,8 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 export const useEditor = create<EditorState>((set, get) => ({
   project: null,
   health: null,
+  library: null,
+  fonts: [],
   status: 'Starting up…',
   error: null,
   dirty: false,
@@ -81,6 +88,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   loop: false,
   selection: [],
   activePanel: 'media',
+  panelOpen: true,
   zoom: 80,
   scroll: 0,
   snapping: true,
@@ -92,6 +100,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     try {
       const health = await api.health();
       set({ health });
+      // The effects/content pickers are served by the API so the two sides
+      // can never drift out of sync.
+      void api
+        .library()
+        .then((library) => set({ library }))
+        .catch(() => undefined);
+      void api
+        .fonts()
+        .then((r) => set({ fonts: r.fonts }))
+        .catch(() => undefined);
       if (!health.ok) {
         set({ error: 'ffmpeg was not found. Run `npm run doctor` in the project folder for install instructions.' });
       }
@@ -213,6 +231,9 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setPanel(activePanel) {
     set({ activePanel });
+  },
+  setPanelOpen(panelOpen) {
+    set({ panelOpen });
   },
   setZoom(zoom) {
     set({ zoom: Math.max(6, Math.min(600, zoom)) });

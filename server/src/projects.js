@@ -51,6 +51,11 @@ export function blankProject(name = 'Untitled project', overrides = {}) {
       ducking: { enabled: true, amount: 0.7, attack: 20, release: 350 },
     },
     watermark: { enabled: false, path: null, position: 'bottom-right', size: 0.12, margin: 0.03, opacity: 0.8 },
+    brandKit: {
+      colors: ['#6b4dff', '#ff5a5f', '#22c9a0', '#ffb020', '#0b1020', '#ffffff'],
+      font: null,
+      logoPath: null,
+    },
   };
   for (const [key, value] of Object.entries(rest)) {
     if (value !== undefined) project[key] = value;
@@ -131,6 +136,7 @@ function migrate(project) {
     captions: { ...base.captions, ...(project.captions || {}), style: { ...base.captions.style, ...(project.captions?.style || {}) } },
     audio: { ...base.audio, ...(project.audio || {}), ducking: { ...base.audio.ducking, ...(project.audio?.ducking || {}) } },
     watermark: { ...base.watermark, ...(project.watermark || {}) },
+    brandKit: { ...base.brandKit, ...(project.brandKit || {}) },
     tracks: (project.tracks || base.tracks).map((t) => ({ volume: 1, clips: [], ...t })),
     media: project.media || [],
   };

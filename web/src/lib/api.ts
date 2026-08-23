@@ -1,4 +1,4 @@
-import type { CaptionItem, ExportPreset, Health, Job, Media, Project } from './types';
+import type { CaptionItem, ExportPreset, Health, Job, Library, Media, Project } from './types';
 
 // In dev, Vite proxies /api to the server; in production the server serves us.
 const BASE = '';
@@ -26,6 +26,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>('/api/health'),
   presets: () => request<{ presets: ExportPreset[] }>('/api/presets'),
+  library: () => request<Library>('/api/library'),
   fonts: () => request<{ fonts: { name: string; path: string }[]; default: string | null }>('/api/fonts'),
 
   browse: (dir?: string) =>

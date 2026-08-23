@@ -1,21 +1,38 @@
 import React, { useEffect, useState } from 'react';
 import { Preview } from './components/Preview';
 import { Timeline } from './components/Timeline';
-import { MediaBin } from './components/MediaBin';
-import { Inspector } from './components/Inspector';
-import { CaptionsPanel } from './components/CaptionsPanel';
+import { Properties } from './components/Properties';
 import { ExportDialog } from './components/ExportDialog';
 import { TopBar } from './components/TopBar';
 import { StatusBar } from './components/StatusBar';
-import { Icon } from './components/ui';
+import { Rail } from './components/Rail';
+import { MediaPanel } from './components/panels/MediaPanel';
+import { CaptionsPanel } from './components/panels/CaptionsPanel';
+import { RecordPanel } from './components/panels/RecordPanel';
+import { ContentPanel } from './components/panels/ContentPanel';
+import { TemplatesPanel } from './components/panels/TemplatesPanel';
+import { TransitionsPanel } from './components/panels/TransitionsPanel';
+import { TextPanel } from './components/panels/TextPanel';
+import { BrandPanel } from './components/panels/BrandPanel';
 import { useEditor } from './state/store';
-import { clipEnd, rippleDelete, splitClip } from './lib/model';
+import { clipEnd, makeTextClip, rippleDelete, splitClip, uid } from './lib/model';
+
+const PANELS = {
+  media: MediaPanel,
+  record: RecordPanel,
+  content: ContentPanel,
+  templates: TemplatesPanel,
+  transitions: TransitionsPanel,
+  text: TextPanel,
+  captions: CaptionsPanel,
+  brand: BrandPanel,
+};
 
 export default function App() {
   const init = useEditor((s) => s.init);
   const project = useEditor((s) => s.project);
   const panel = useEditor((s) => s.activePanel);
-  const setPanel = useEditor((s) => s.setPanel);
+  const panelOpen = useEditor((s) => s.panelOpen);
   const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
@@ -24,30 +41,23 @@ export default function App() {
 
   useKeyboardShortcuts(() => setExporting(true));
 
+  const ActivePanel = PANELS[panel] ?? MediaPanel;
+
   return (
     <div className="app">
       <TopBar onExport={() => setExporting(true)} />
 
       <div className="workspace">
-        <aside className="sidebar sidebar-left">
-          <nav className="sidebar-tabs">
-            <button type="button" className={panel === 'media' ? 'is-active' : ''} onClick={() => setPanel('media')} title="Media">
-              {Icon.film} Media
-            </button>
-            <button type="button" className={panel === 'captions' ? 'is-active' : ''} onClick={() => setPanel('captions')} title="Captions">
-              {Icon.captions} Captions
-            </button>
-          </nav>
-          {panel === 'captions' ? <CaptionsPanel /> : <MediaBin />}
-        </aside>
-
+        <Rail />
+        {panelOpen ? (
+          <div className="side-panel">
+            <ActivePanel />
+          </div>
+        ) : null}
         <main className="stage">
           <Preview />
         </main>
-
-        <aside className="sidebar sidebar-right">
-          <Inspector />
-        </aside>
+        <Properties />
       </div>
 
       <Timeline />
@@ -93,8 +103,9 @@ function useKeyboardShortcuts(openExport: () => void) {
             for (const clip of [...track.clips]) {
               if (!selection.includes(clip.id)) continue;
               const copy = structuredClone(clip);
-              copy.id = `c_${Math.random().toString(36).slice(2, 10)}`;
+              copy.id = uid('c_');
               copy.start = clipEnd(clip);
+              copy.transitionIn = null;
               track.clips.push(copy);
             }
             track.clips.sort((a, b) => a.start - b.start);
@@ -172,33 +183,7 @@ function useKeyboardShortcuts(openExport: () => void) {
           state.commit('Added title', (draft) => {
             const track = draft.tracks.find((t) => t.id === target.id);
             if (!track) return;
-            const clip = {
-              id: `c_${Math.random().toString(36).slice(2, 10)}`,
-              type: 'text' as const,
-              start: playhead,
-              duration: 3,
-              inPoint: 0,
-              speed: 1,
-              volume: 1,
-              fadeIn: 0.25,
-              fadeOut: 0.25,
-              transform: { fit: 'contain' as const, scale: 1, x: 0, y: 0, rotation: 0, opacity: 1 },
-              effects: {},
-              text: {
-                content: 'Your title here',
-                size: 72,
-                color: '#ffffff',
-                align: 'center' as const,
-                x: 0.5,
-                y: 0.5,
-                bold: true,
-                strokeWidth: 6,
-                strokeColor: '#000000',
-                shadow: true,
-                background: 'none',
-                maxWidth: 0.86,
-              },
-            };
+            const clip = makeTextClip(playhead, 3.5);
             track.clips.push(clip);
             track.clips.sort((a, b) => a.start - b.start);
             newId = clip.id;
