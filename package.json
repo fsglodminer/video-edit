@@ -1,0 +1,23 @@
+{
+  "name": "jumpcut",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JumpCut - a local video editor for making YouTube content",
+  "type": "module",
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "postinstall": "node scripts/check-ffmpeg.mjs",
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "build": "npm run build --workspace web",
+    "start": "npm run build && npm run start --workspace server",
+    "typecheck": "npm run typecheck --workspace web",
+    "doctor": "node scripts/check-ffmpeg.mjs --verbose",
+    "test": "node scripts/selftest.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
