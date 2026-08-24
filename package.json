@@ -15,6 +15,7 @@
     "start": "npm run build && npm run start --workspace server",
     "typecheck": "npm run typecheck --workspace web",
     "doctor": "node scripts/check-ffmpeg.mjs --verbose",
+    "uninstall": "node scripts/uninstall.mjs",
     "test": "node scripts/selftest.mjs"
   },
   "devDependencies": {

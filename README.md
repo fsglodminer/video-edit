@@ -220,6 +220,35 @@ after upload.
 
 ---
 
+## Uninstalling
+
+JumpCut lives in two places and nowhere else — this folder and `~/JumpCut`.
+Nothing is installed globally, no service is registered, nothing is added to
+your `PATH`.
+
+```bash
+npm run uninstall               # dependencies (bundled ffmpeg included) and build output
+npm run uninstall -- --cache    # also clear thumbnails, waveforms and proxies
+npm run uninstall -- --data     # also delete ~/JumpCut: projects, media, exports
+npm run uninstall -- --dry-run  # list what would go, delete nothing
+```
+
+It prints everything it found with sizes and asks before deleting. Your work in
+`~/JumpCut` stays unless you pass `--data`, and footage you linked from
+elsewhere on disk is never touched either way.
+
+Then delete the folder itself:
+
+```bash
+cd .. && rm -rf video-edit
+```
+
+If you installed `ffmpeg` system-wide just for JumpCut, and nothing else on
+your machine uses it, `brew uninstall ffmpeg` (or `sudo apt remove ffmpeg`, or
+`winget uninstall Gyan.FFmpeg`) finishes the job.
+
+---
+
 ## Notes and limits
 
 - **Titles and captions need a text renderer in ffmpeg.** Almost every build has
